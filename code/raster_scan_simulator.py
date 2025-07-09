@@ -13,6 +13,8 @@ Outputs:
 import numpy as np
 import nirfasterff as ff
 import matplotlib.pyplot as plt
+import h5py
+
 
 # --------------------------------------------------------------
 # STEP 1 - Create breast volume with random ellipsoidal tumours
@@ -176,65 +178,49 @@ def visualize_mesh_with_probe(mesh, src, det, save_as="mesh_with_probe.png"):
 # --------------------------------------------------------------
 # STEP 6 - Raster scan probe across x, solving FD each time
 # --------------------------------------------------------------
-def raster_scan_fd(mesh, scan_x_range, scan_y_fixed=30, fd_freq_hz=140e6):
+def raster_scan_fd_2d_and_save(mesh, 
+                                x_range, y_range, 
+                                fd_freq_hz=140e6, 
+                                h5_filename="phantom_fd_scan.h5"):
     """
-    Moves the rigid probe in x across the surface. At each position:
-    - places source + detectors
-    - sets link matrix
-    - runs frequency-domain FEM solve
+    Raster scans the rigid probe across x and y, performing an FD solve at each position.
+    Writes amplitude, phase, and probe geometry into an HDF5 file.
 
-    Returns
-    -------
-    arrays of amplitude & phase across all scan positions
+    Parameters
+    ----------
+    x_range : iterable of x positions for the source.
+    y_range : iterable of y positions for the source.
     """
-    all_amplitudes = []
-    all_phases = []
+    n_positions = len(x_range) * len(y_range)
+    print(f"Running full 2D raster scan with {n_positions} source positions.")
 
-    for x in scan_x_range:
-        src, det = make_probe_line((x, scan_y_fixed))
-        mesh.source = ff.base.optode(src)
-        mesh.meas   = ff.base.optode(det)
-        mesh.link = np.array([[1,1,1], [1,2,1], [1,3,1]])  # rigid probe
-        mesh.touch_optodes()
+    with h5py.File(h5_filename, "w") as f:
+        amp_ds = f.create_dataset("amplitude", shape=(n_positions,3), dtype="f4")
+        pha_ds = f.create_dataset("phase",     shape=(n_positions,3), dtype="f4")
+        src_ds = f.create_dataset("source_pos", shape=(n_positions,3), dtype="f4")
+        det_ds = f.create_dataset("det_pos",    shape=(n_positions,3,3), dtype="f4")
 
-        # Solve forward problem at this position
-        data, info = mesh.femdata(fd_freq_hz)
-        amplitude = data.amplitude
-        phase = np.degrees(data.phase)  # convert rad → deg
+        idx = 0
+        for sx in x_range:
+            for sy in y_range:
+                src, det = make_probe_line((sx, sy))
+                mesh.source = ff.base.optode(src)
+                mesh.meas   = ff.base.optode(det)
+                mesh.link = np.array([[1,1,1], [1,2,1], [1,3,1]])
+                mesh.touch_optodes()
 
-        all_amplitudes.append(amplitude)
-        all_phases.append(phase)
+                data, info = mesh.femdata(fd_freq_hz)
+                amplitude = data.amplitude
+                phase = np.degrees(data.phase)
 
-    return np.array(all_amplitudes), np.array(all_phases)
+                amp_ds[idx] = amplitude
+                pha_ds[idx] = phase
+                src_ds[idx] = src
+                det_ds[idx] = det
+                idx += 1
 
-# --------------------------------------------------------------
-# STEP 7 - Plot amplitude & phase across scan positions
-# --------------------------------------------------------------
-def plot_fd_scan_results(amplitudes, phases, scan_x_range, save_as="fd_scan.png"):
-    """
-    Plots amplitude & phase curves for each detector across raster positions.
-    """
-    fig, axs = plt.subplots(1, 2, figsize=(14,5))
-    for ch in range(amplitudes.shape[1]):
-        axs[0].plot(scan_x_range, amplitudes[:,ch], 'o-', label=f"Det {ch+1}")
-        axs[1].plot(scan_x_range, phases[:,ch], 'o-', label=f"Det {ch+1}")
+    print(f"Finished scan. Data saved to {h5_filename}")
 
-    axs[0].set_title("Amplitude vs scan position")
-    axs[0].set_xlabel("Scan x-position (mm)")
-    axs[0].set_ylabel("Amplitude (a.u.)")
-    axs[0].grid(True)
-
-    axs[1].set_title("Phase vs scan position")
-    axs[1].set_xlabel("Scan x-position (mm)")
-    axs[1].set_ylabel("Phase (degrees)")
-    axs[1].grid(True)
-
-    plt.suptitle("Frequency-domain scan across breast phantom")
-    axs[0].legend()
-    axs[1].legend()
-    plt.savefig(save_as, dpi=200)
-    plt.show()
-    print(f"Saved scan results plot to {save_as}")
 
 # --------------------------------------------------------------
 # Main program orchestrating the entire pipeline
@@ -247,15 +233,14 @@ def main():
     mesh = assign_optical_properties(mesh, rng_seed=42)
 
     # Sanity check: show one probe
-    src, det = make_probe_line((15,30))
+    src, det = make_probe_line((10,30))
     visualize_mesh_with_probe(mesh, src, det)
 
     # Raster scan along x from 10 to 30 in 2mm steps
     scan_x_range = np.arange(10, 31, 2)
-    amplitudes, phases = raster_scan_fd(mesh, scan_x_range, scan_y_fixed=30)
+    scan_y_range = np.arange(10, 41, 2)  # e.g. from 10 to 40 in y, step 2
+    raster_scan_fd_2d_and_save(mesh, scan_x_range, scan_y_range)
 
-    # Plot results
-    plot_fd_scan_results(amplitudes, phases, scan_x_range)
     print("All done.")
 
 if __name__ == "__main__":
